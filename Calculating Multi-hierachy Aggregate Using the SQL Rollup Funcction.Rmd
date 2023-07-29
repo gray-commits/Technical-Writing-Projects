@@ -1,0 +1,228 @@
+---
+title: "SQLTechWriting"
+author: "Gray"
+date: "2023-07-28"
+output: html_document
+---
+
+# **Compiling Unit-Level, Multi Aggregates in PostgreSql Using `ROLLUP` Function**
+
+Database from [postgresqlexercise.com](https://pgexercises.com/){style="color: yellow"}
+
+Calculating multi-level aggregate in SQL can be quite a struggle. True in all cases especially in those requiring analysts to generate multiple grouping sets. For ease of comprehension, imaging needing to write a SQL query total sales for all months per service station, and a total for all months for all service station.
+
+The query is expected to return Service Station Id, Sum of Sales for each month returned (then, a summation of all sales per service station), and finally, a grand summation of all sales for the returned months.
+
+***Sample Output:***
+
+| ServiceStation_id | SalesMonth | Sales |
+|-------------------|------------|-------|
+| 0                 | 4          | 55    |
+| 0                 | 5          | 20    |
+| 0                 | 6          | 60    |
+| 0                 |            | 135   |
+| 1                 | 4          | 785   |
+| 1                 | 5          | 120   |
+| 1                 | 6          | 609   |
+| 1                 |            | 1,514 |
+| 2                 | 4          | 1,055 |
+| 2                 | 5          | 700   |
+| 2                 | 6          | 985   |
+| 2                 |            | 2,740 |
+| 3                 | 4          | 500   |
+| 3                 | 5          | 650   |
+| 3                 | 6          | 1,600 |
+| 3                 |            | 2750  |
+| TotalSales        |            | 7,500 |
+
+On the surface, this level of hierarchy calculations would require the compilation of multiple per-month queries, stacked on the next with multiple `UNION ALL`. Data analysts are often trapped with compiling a stacked queries of `UNION ALL` to solve this problem.
+
+### **Performing Multi-hierarchy Aggregates with UNION ALL**
+
+```{sql}
+
+-- 1st Aggregate
+
+SELECT facid, 
+       extract(month FROM starttime) AS month, 
+       SUM(slots) AS slots
+  FROM 
+       bookings
+  WHERE 
+       extract(year FROM starttime) = '2012' AND facid = 0
+  GROUP BY 
+       facid, month
+
+
+UNION ALL
+
+
+SELECT facid, NULL,
+       SUM(slots) as slots
+  FROM 
+       bookings
+  WHERE 
+       extract(year FROM starttime) = '2012' AND facid = 0
+  GROUP BY 
+       facid
+
+
+UNION ALL
+
+-- 2nd Aggregate
+
+  SELECT 
+        facid, 
+        extract(month FROM starttime) AS month, 
+        SUM(slots) AS slots
+    FROM 
+        bookings
+    WHERE 
+        extract(year FROM starttime) = '2012' AND facid = 1
+    GROUP BY 
+        facid, month
+
+UNION ALL
+
+    SELECT facid, 
+           NULL, SUM(slots) AS slots
+      FROM 
+           bookings
+      WHERE 
+           extract(year FROM starttime) = '2012' and facid = 1
+      GROUP BY  
+           facid
+
+UNION ALL
+
+-- 3nd Aggregate
+-- ..
+-- ..
+-- ..
+-- 8th Aggregate
+
+UNION ALL
+-- [cummulative sale figure for all stations]
+  SELECT NULL,
+         NULL, 
+         SUM(slots) AS slots
+  FROM 
+        bookings
+  WHERE 
+        extract(year from starttime) = '2012'
+
+
+```
+
+A succinct look at the query above reveals a structure;
+
+1.  A repetition of per-service station query, returning total sales for each month and the grand total revenue for each service station accumulating sales for months 4, 5 and 6.
+
+2.  Each query, 7 in all, are stacked with a `UNION ALL` and subsequently stacked on the query returning the cumulative sales of all service station [7,500].
+
+3.  With a 3-column structure in the expected output, `SELECT NULL` creates null cells for easy understanding of the output.
+
+Using `UNION ALL` to stack multiple queries while performing multi-hierarchy aggregations like this comes with a myriad of problems. The repetition is long, hard-to-debug and prone to typo errors.
+
+Alternatively, using a `ROLLUP` solves these problems.
+
+```{sql Roll Up Synthax}
+
+SELECT aggregate_function {MIN,MAX,SUM,COUNT,AVG}(ColumnsName),
+       ColumnsName_a, ColumnsName2_b, ColumnsName_c,...
+FROM   TableName
+GROUP BY
+       ROLLUP(ColumnsName_a, ColumnsName2_b, ColumnsName_c,...)
+```
+
+### **Performing Multi-hierarchy Aggregates with `ROLLUP`**
+
+By extension, the `ROLLUP` function extends the grouping operation of the `GROUP BY` clause to include multi-level grouping sets. It generates a subtotal over the grouping sets using an extra row of null(s). These rows are commonly described as the super-aggregate rows. In addition. In addition, `ROLLUP` also returns a grand total row, generating at least 2 levels of grouping sets per execution.
+
+Synthax:
+
+```{sql}
+
+SELECT aggregate_function {MIN,MAX,SUM,COUNT,AVG}(ColumnsName),
+       ColumnsName_a, ColumnsName2_b, ColumnsName_c,...
+FROM   TableName
+GROUP BY
+       ROLLUP(ColumnsName_a, ColumnsName2_b, ColumnsName_c,...)
+
+```
+
+For instance;
+
+```{sql}
+SELECT 
+      facid, extract(month FROM starttime) AS month, SUM(slots) AS slots 
+FROM 
+      bookings
+WHERE 
+      extract(year FROM starttime) = '2012'
+GROUP BY ROLLUP(facid, month)
+ORDER BY facid, month
+
+```
+
+*Output:*
+
+Understanding ROLLUP
+
+a\. ROLLUP with one column
+
+```{sql}
+SELECT 
+      facid, SUM(slots) AS slots 
+FROM 
+      bookings
+WHERE 
+      facid in (0,1,2,3,4,5,6,7,8)
+GROUP BY ROLLUP (facid)
+ORDER BY facid
+```
+
+*Output:*
+
+With this example, its is clear the `ROLLUP` is performed directly on attributes described by its argument (in this case, `facid`). It also automatically produces a grand total row as the last hierarchy of super-aggregation. To make an output more readable, empty rows describing the aggregated value can be described with text using the `COALESCE` or the `CASE` function. With the `COALESCE` function, parameters in its argument must be of the same data type.
+
+```{sql}
+SELECT 
+      Coalesce (name, 'Sum in All Facilities --> ') as name, 
+	    SUM(slots) AS slots 
+FROM 
+      bookings join facilities
+	      on bookings.facid = facilities.facid
+WHERE 
+      bookings.facid in (0,1,2,3,4,5,6,7,8)
+      
+GROUP BY ROLLUP (facilities.name)
+ORDER BY facilities.name
+```
+
+*Output:*
+
+b\. Partial ROLLUP
+
+In partial `ROLLUP` aggregations, the function returns super aggregation only for one column although two arguments were passed into it. It makes a reasonable guess on the argument to use for the aggregation calculation.
+
+```{sql}
+SELECT 
+    COALESCE (name, 'TotalSlots -->') AS name,
+	  bookings.memid AS membersId,
+	  SUM(slots) AS slots 
+FROM 
+      bookings join 
+	    facilities on bookings.facid = facilities.facid
+WHERE 
+      bookings.facid in (0,1,2,3,4,5,6,7,8) AND 
+	    bookings.memid in (0,1)
+GROUP BY ROLLUP (facilities.name, bookings.memid)
+ORDER BY facilities.name
+```
+
+*Output:*
+
+With the `ROLLUP` function in RDBMs, you are saved the burden of writing multiple `CASE` statements or stacking per-query results using the `UNION ALL` function.
+
+Hopefully this helps in your next Analysis!
